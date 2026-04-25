@@ -133,9 +133,9 @@ dependencies = [
 
 [[package]]
 name = "actix-web"
-version = "4.13.0"
+version = "4.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff87453bc3b56e9b2b23c1cc0b1be8797184accf51d2abe0f8a33ec275d316bf"
+checksum = "2cce64e942deba4ad3dca8f1ede704fc2bfdb3d461c213e044b8f321b599a7e0"
 dependencies = [
  "actix-codec",
  "actix-http",
@@ -168,7 +168,7 @@ dependencies = [
  "serde_json",
  "serde_urlencoded",
  "smallvec",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "time",
  "tracing",
  "url",
@@ -402,7 +402,6 @@ dependencies = [
  "iana-time-zone",
  "js-sys",
  "num-traits",
- "serde",
  "wasm-bindgen",
  "windows-link",
 ]
