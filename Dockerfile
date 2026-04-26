@@ -6,8 +6,7 @@ RUN cargo build --release
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y ca-certificates sqlite3 && rm -rf /var/lib/apt/lists/*
-RUN mkdir -p /data && chmod 777 /data
+RUN mkdir -p /app/data && chmod 777 /app/data
 COPY --from=builder /app/target/release/simdiatokens_server /usr/local/bin/
 EXPOSE 8080
-# No USER line – runs as root by default
 CMD ["simdiatokens_server"]
