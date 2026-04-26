@@ -269,11 +269,27 @@ async fn init_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 async fn main() -> std::io::Result<()> {
     dotenv().ok();
     let config = AppConfig::from_env();
+
+    // Ensure the database directory exists before connecting
+    let db_path = config.database_url
+        .strip_prefix("sqlite:")
+        .unwrap_or(&config.database_url);
+    
+    if db_path != ":memory:" {
+        if let Some(parent) = std::path::Path::new(db_path).parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)
+                    .expect("Failed to create database directory");
+            }
+        }
+    }
+
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
         .connect(&config.database_url)
         .await
         .expect("Failed to create database pool");
+
     init_db(&pool).await.expect("Failed to init DB");
     let http_client = Client::new();
     let app_state = web::Data::new(AppState { pool, config, http_client });
