@@ -270,33 +270,70 @@ async fn main() -> std::io::Result<()> {
     dotenv().ok();
     let config = AppConfig::from_env();
 
-    // Ensure the database directory exists before connecting
+    // Strip sqlite: prefix to get raw file path
     let db_path = config.database_url
         .strip_prefix("sqlite:")
-        .unwrap_or(&config.database_url);
-    
+        .unwrap_or(&config.database_url)
+        .to_string();
+
+    // Wait for volume to be ready and create directory
     if db_path != ":memory:" {
-        if let Some(parent) = std::path::Path::new(db_path).parent() {
+        if let Some(parent) = std::path::Path::new(&db_path).parent() {
             if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)
-                    .expect("Failed to create database directory");
+                // Retry loop - volume may not be mounted yet
+                let mut attempts = 0;
+                loop {
+                    match std::fs::create_dir_all(parent) {
+                        Ok(_) => {
+                            println!("Database directory ready: {:?}", parent);
+                            break;
+                        }
+                        Err(e) => {
+                            attempts += 1;
+                            if attempts >= 20 {
+                                panic!("Failed to create database directory after 20 attempts: {}", e);
+                            }
+                            println!("Waiting for volume to mount (attempt {}/20): {}", attempts, e);
+                            std::thread::sleep(std::time::Duration::from_secs(2));
+                        }
+                    }
+                }
             }
         }
     }
 
-    let pool = SqlitePoolOptions::new()
-        .max_connections(5)
-        .connect(&config.database_url)
-        .await
-        .expect("Failed to create database pool");
+    // Retry DB connection - volume may still be initializing
+    let pool = {
+        let mut attempts = 0;
+        loop {
+            match SqlitePoolOptions::new()
+                .max_connections(5)
+                .connect(&config.database_url)
+                .await
+            {
+                Ok(p) => {
+                    println!("Database connected successfully");
+                    break p;
+                }
+                Err(e) => {
+                    attempts += 1;
+                    if attempts >= 20 {
+                        panic!("Failed to create database pool after 20 attempts: {}", e);
+                    }
+                    println!("Waiting for database to be ready (attempt {}/20): {}", attempts, e);
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
+            }
+        }
+    };
 
     init_db(&pool).await.expect("Failed to init DB");
     let http_client = Client::new();
     let app_state = web::Data::new(AppState { pool, config, http_client });
-    
+
     let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
     let port = port.parse::<u16>().unwrap_or(8080);
-    
+
     println!("SimdiaTokens backend running on http://0.0.0.0:{}", port);
     HttpServer::new(move || {
         App::new()
