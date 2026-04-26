@@ -7,6 +7,7 @@ use std::env;
 use dotenv::dotenv;
 use reqwest::Client;
 use rand::Rng;
+use actix_cors::Cors;
 
 // ------------------- CONFIGURATION -------------------
 #[derive(Debug, Clone)]
@@ -358,7 +359,12 @@ async fn main() -> std::io::Result<()> {
 
     println!("SimdiaTokens backend running on http://0.0.0.0:{}", port);
     HttpServer::new(move || {
+        let cors = Cors::default()
+            .allow_any_origin()
+            .allow_any_method()
+            .allow_any_header();
         App::new()
+            .wrap(cors)
             .app_data(app_state.clone())
             .route("/exchange", web::get().to(exchange_code))
             .route("/admin", web::get().to(admin_dashboard))
