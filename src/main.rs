@@ -270,62 +270,52 @@ async fn main() -> std::io::Result<()> {
     dotenv().ok();
     let config = AppConfig::from_env();
 
-    // Strip sqlite: prefix to get raw file path
     let db_path = config.database_url
-        .strip_prefix("sqlite:")
+        .strip_prefix("sqlite:///")
+        .or_else(|| config.database_url.strip_prefix("sqlite://"))
+        .or_else(|| config.database_url.strip_prefix("sqlite:"))
         .unwrap_or(&config.database_url)
         .to_string();
 
-    // Wait for volume to be ready and create directory
     if db_path != ":memory:" {
+        // Ensure parent directory exists
         if let Some(parent) = std::path::Path::new(&db_path).parent() {
             if !parent.as_os_str().is_empty() {
-                // Retry loop - volume may not be mounted yet
-                let mut attempts = 0;
-                loop {
-                    match std::fs::create_dir_all(parent) {
-                        Ok(_) => {
-                            println!("Database directory ready: {:?}", parent);
-                            break;
-                        }
-                        Err(e) => {
-                            attempts += 1;
-                            if attempts >= 20 {
-                                panic!("Failed to create database directory after 20 attempts: {}", e);
-                            }
-                            println!("Waiting for volume to mount (attempt {}/20): {}", attempts, e);
-                            std::thread::sleep(std::time::Duration::from_secs(2));
-                        }
-                    }
-                }
+                std::fs::create_dir_all(parent)
+                    .expect("Failed to create database directory");
+            }
+        }
+
+        // Test that we can actually write to the directory
+        let test_file = std::path::Path::new(&db_path)
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join(".write_test");
+        match std::fs::write(&test_file, b"test") {
+            Ok(_) => {
+                std::fs::remove_file(&test_file).ok();
+                println!("Write test passed on directory");
+            }
+            Err(e) => {
+                panic!("Directory is NOT writable: {}. Check Railway volume permissions.", e);
             }
         }
     }
 
-    // Retry DB connection - volume may still be initializing
-    let pool = {
-        let mut attempts = 0;
-        loop {
-            match SqlitePoolOptions::new()
-                .max_connections(5)
-                .connect(&config.database_url)
-                .await
-            {
-                Ok(p) => {
-                    println!("Database connected successfully");
-                    break p;
-                }
-                Err(e) => {
-                    attempts += 1;
-                    if attempts >= 20 {
-                        panic!("Failed to create database pool after 20 attempts: {}", e);
-                    }
-                    println!("Waiting for database to be ready (attempt {}/20): {}", attempts, e);
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                }
-            }
-        }
+    // Use ?mode=rwc to force SQLite to create the file if it doesn't exist
+    let connect_url = if db_path == ":memory:" {
+        config.database_url.clone()
+    } else {
+        format!("sqlite:///{}?mode=rwc", db_path)
     };
+
+    println!("Connecting to: {}", connect_url);
+
+    let pool = SqlitePoolOptions::new()
+        .max_connections(5)
+        .connect(&connect_url)
+        .await
+        .expect("Failed to create database pool");
 
     init_db(&pool).await.expect("Failed to init DB");
     let http_client = Client::new();
